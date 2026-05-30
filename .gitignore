@@ -1,4 +1,7 @@
-data/*
+data/fasta_717/
+data/feature_data 
+data/leave_one/
+data/msa_output_717/
 !data/.gitkeep
 # notebook/
 results/
