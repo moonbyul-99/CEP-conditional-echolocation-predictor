@@ -15,6 +15,8 @@ ESL-PSC: Allard et al. (2025), Nature Communications
 import numpy as np
 import pandas as pd
 from itertools import product
+from multiprocessing import Pool
+from tqdm import tqdm
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, roc_auc_score
@@ -236,6 +238,39 @@ class ESLClassifier(BaseEstimator, ClassifierMixin):
 
 
 # =====================================================================
+#  ESL-PSC 并行训练 worker（模块级函数，供 multiprocessing pickle）
+# =====================================================================
+
+def _train_one_psc_model(task):
+    """
+    训练单个 ESL 模型（供 ESLPSCClassifier.fit 多进程调用）。
+
+    Parameters
+    ----------
+    task : tuple
+        (X_psc, y_psc, group_ids, feature_names, position_names, gene_names,
+         l1, l2, max_iter, tol)
+
+    Returns
+    -------
+    dict or None — {"clf": ESLClassifier, "mfs": float}
+    """
+    (X_psc, y_psc, group_ids, feature_names, position_names, gene_names,
+     l1, l2, max_iter, tol) = task
+    try:
+        clf = ESLClassifier(lambda1=l1, lambda2=l2, max_iter=max_iter, tol=tol)
+        clf.fit(X_psc, y_psc, group_ids,
+                feature_names=feature_names,
+                position_names=position_names,
+                gene_names=gene_names)
+        sps = clf.decision_function(X_psc)
+        mfs = float(np.sqrt(np.mean(((y_psc * 2 - 1) - sps) ** 2)))
+        return dict(clf=clf, mfs=mfs)
+    except Exception:
+        return None
+
+
+# =====================================================================
 #  ESLPSCClassifier
 # =====================================================================
 
@@ -269,13 +304,16 @@ class ESLPSCClassifier(BaseEstimator, ClassifierMixin):
 
     def __init__(self, lambda1_list=None, lambda2_list=None,
                  top_pct=0.2, n_alternates=3,
-                 order_col="order_chinese", label_col="label"):
+                 order_col="order_chinese", label_col="label",
+                 n_cpu=1, verbose=False):
         self.lambda1_list = lambda1_list or [0.005, 0.01, 0.05, 0.1]
         self.lambda2_list = lambda2_list or [0.005, 0.01, 0.05, 0.1]
         self.top_pct = top_pct
         self.n_alternates = n_alternates
         self.order_col = order_col
         self.label_col = label_col
+        self.n_cpu = n_cpu
+        self.verbose = verbose
         self.classes_ = np.array([0, 1])
 
     # ---------- PSC 配对 ----------
@@ -343,29 +381,48 @@ class ESLPSCClassifier(BaseEstimator, ClassifierMixin):
             pairs = self._select_psc_pairs(meta_df, self.order_col, self.label_col)
             pairs_list = [pairs] if pairs else []
 
-        self.models_ = []
+        n_lambda = len(self.lambda1_list) * len(self.lambda2_list)
+        n_total = len(pairs_list) * n_lambda
+        if self.verbose:
+            print(f"  [ESL-PSC] {len(pairs_list)} PSC 组合 × {n_lambda} λ 对 = {n_total} 个模型待训练")
+
+        # ---- 收集所有训练任务 ----
+        tasks = []
         for pairs in pairs_list:
             psc_species = list(dict.fromkeys(
                 s for pair in pairs for s in pair
             ))
             if len(psc_species) < 4:
                 continue
-            # 从全局编码矩阵中取 PSC 子集的行
             psc_idx = [sp_to_idx[s] for s in psc_species]
-            X_psc = X_all[psc_idx]
+            X_psc = X_all[psc_idx].copy()  # copy 避免子进程共享大矩阵的视图问题
             y_psc = np.array([int(meta_df.loc[s, self.label_col]) for s in psc_species])
 
             for l1 in self.lambda1_list:
                 for l2 in self.lambda2_list:
-                    clf = ESLClassifier(lambda1=l1, lambda2=l2, max_iter = max_iter, tol=tol)
-                    try:
-                        clf.fit(X_psc, y_psc, gid, feature_names=fn,
-                                position_names=pn, gene_names=gn)
-                    except Exception:
-                        continue
-                    sps = clf.decision_function(X_psc)
-                    mfs = float(np.sqrt(np.mean(((y_psc * 2 - 1) - sps) ** 2)))
-                    self.models_.append(dict(clf=clf, mfs=mfs))
+                    tasks.append((X_psc, y_psc, gid, fn, pn, gn,
+                                  l1, l2, max_iter, tol))
+
+        # ---- 并行训练所有模型 ----
+        n_workers = min(self.n_cpu, len(tasks)) if len(tasks) > 0 else 1
+        if self.verbose:
+            print(f"  [ESL-PSC] 并行训练 {len(tasks)} 个模型 (workers={n_workers})")
+
+        if n_workers > 1 and len(tasks) > 1:
+            with Pool(processes=n_workers) as pool:
+                raw_results = list(tqdm(
+                    pool.imap(_train_one_psc_model, tasks),
+                    total=len(tasks),
+                    desc="  PSC models",
+                    disable=not self.verbose,
+                ))
+        else:
+            raw_results = []
+            it = tqdm(tasks, desc="  PSC models", disable=not self.verbose) if self.verbose else tasks
+            for task in it:
+                raw_results.append(_train_one_psc_model(task))
+
+        self.models_ = [r for r in raw_results if r is not None]
 
         # 按 MFS 保留 top models
         if self.models_:

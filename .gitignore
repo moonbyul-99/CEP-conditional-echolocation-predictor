@@ -1,5 +1,6 @@
 data/*
 !data/.gitkeep
-notebook/
+# notebook/
 results/
 cep_draft_0523.pdf
+draft_paper/

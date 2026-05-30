@@ -3,13 +3,19 @@
 CEP 消融实验脚本
 
 运行 5 种 RF 变体，对比不同策略对预测准确率的影响：
-  1. local_rf_no_coldstart  - 局部 RF（同目训练集），无冷启动
+  1. local_no_coldstart  - 局部 RF（同目训练集），无冷启动
   2. global_rf              - 全局 RF（全部物种训练集）
-  3. local_rf_coldstart_score  - CEP 完整策略（冷启动 + cover_score×NMI 排序）
-  4. local_rf_coldstart_random - 冷启动 + 随机特征
-  5. local_rf_coldstart_nmi    - 冷启动 + 仅 NMI 排序
+  3. coldstart_score  - **CEP 的 RF 组件**（冷启动 + cover_score×NMI 排序）
+                        即 leave_one_eval.py 中翼手目/鲸目使用的完整 RF 策略，
+                        此处对所有 104 物种统一应用以衡量其泛化能力
+  4. coldstart_random - 冷启动 + 随机特征（对照：检验特征排序的贡献）
+  5. coldstart_nmi    - 冷启动 + 仅 NMI 排序（对照：检验 cover_score 的贡献）
 
 等价于 notebook/04_方法对比_v3.ipynb
+
+注意：CEP 完整方法（leave_one_run.py）对翼手目/鲸目使用 coldstart_score (RF)，
+      对其他目使用趋同突变计数法。本脚本的 coldstart_score 变体将 RF 策略
+      扩展到所有物种，用于消融对比。
 
 用法：
     cd CEP_project
@@ -117,7 +123,11 @@ def _run_rf(feature_df, meta_df, train_species, species_id, max_feat):
 
 
 def variant_local_no_coldstart(species_id, feature_df, meta_df, summary_df, max_feat=30):
-    """变体 1：局部 RF，无冷启动（鲸/翼/啮→同目，其他→全局）"""
+    """变体 1：局部 RF，无冷启动（对照：检验冷启动的贡献）
+    
+    鲸/翼/啮→同目训练集，其他→全局训练集。
+    不使用 _build_ref_list() 冷启动策略，直接使用特征 1-30。
+    """
     order = meta_df.loc[species_id, 'order_chinese_new']
     if order in ['鲸目', '翼手目', '啮齿目']:
         train = [s for s in meta_df.index
@@ -128,7 +138,10 @@ def variant_local_no_coldstart(species_id, feature_df, meta_df, summary_df, max_
 
 
 def variant_global_rf(species_id, feature_df, meta_df, summary_df, max_feat=30):
-    """变体 2：全局 RF（全部物种，排除自身）"""
+    """变体 2：全局 RF（对照：检验局部训练集 vs 全局训练集的差异）
+    
+    所有物种都使用全部物种作为训练集（排除自身）。
+    """
     train = [s for s in meta_df.index if s != species_id]
     return _run_rf(feature_df, meta_df, train, species_id, max_feat)
 
@@ -173,7 +186,16 @@ def _run_rf_with_probs(feature_df, meta_df, summary_df, species_id,
 
 
 def variant_coldstart_score(species_id, feature_df, meta_df, summary_df, max_feat=500):
-    """变体 3：CEP 完整策略（冷启动 + cover_score×NMI）"""
+    """变体 3：**CEP 的 RF 组件**（冷启动 + cover_score×NMI）
+    
+    与 leave_one_eval.py 中翼手目/鲸目的 predict_species() 完全一致：
+      - 使用 _build_ref_list() 构建冷启动参考物种列表
+      - 特征按 cover_score × NMI 降序排列
+      - 过滤 Eco_Mode == '-' 的位点
+      - RF 逐步增加特征数，概率取均值，> 0.5 判定为回声
+    区别：CEP 完整方法仅对翼手目/鲸目使用此策略，
+         此处扩展到所有 104 物种以进行消融对比。
+    """
     sdf = _rescore(summary_df)
     fdf = feature_df.loc[:, sdf.index]
     order = meta_df.loc[species_id, 'order_chinese_new']
@@ -184,7 +206,11 @@ def variant_coldstart_score(species_id, feature_df, meta_df, summary_df, max_fea
 
 
 def variant_coldstart_random(species_id, feature_df, meta_df, summary_df, max_feat=500):
-    """变体 4：冷启动 + 随机特征"""
+    """变体 4：冷启动 + 随机特征（对照：检验 cover_score×NMI 排序的贡献）
+    
+    与 coldstart_score 相同的冷启动和 RF 策略，
+    但特征顺序随机打乱而非按 score 降序。
+    """
     sdf = _rescore(summary_df)
     N = sdf.shape[0]
     np.random.seed(42)
@@ -199,7 +225,11 @@ def variant_coldstart_random(species_id, feature_df, meta_df, summary_df, max_fe
 
 
 def variant_coldstart_nmi(species_id, feature_df, meta_df, summary_df, max_feat=500):
-    """变体 5：冷启动 + 仅 NMI 排序"""
+    """变体 5：冷启动 + 仅 NMI 排序（对照：检验 cover_score 的贡献）
+    
+    与 coldstart_score 相同的冷启动和 RF 策略，
+    但特征按 NMI 降序而非 cover_score×NMI 降序。
+    """
     sdf = summary_df.copy().sort_values(by='NMI', ascending=False)
     fdf = feature_df.loc[:, sdf.index]
     order = meta_df.loc[species_id, 'order_chinese_new']
@@ -255,7 +285,7 @@ def process_one(species_id, base_dir, variants_to_run):
 VARIANTS = {
     'local_no_cold':    variant_local_no_coldstart,
     'global_rf':        variant_global_rf,
-    'coldstart_score':  variant_coldstart_score,
+    # 'coldstart_score':  variant_coldstart_score,
     'coldstart_random': variant_coldstart_random,
     'coldstart_nmi':    variant_coldstart_nmi,
 }
