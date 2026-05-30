@@ -12,6 +12,8 @@
 
 The CEP framework takes multiple sequence alignments (MSAs) and a phenotypically labeled phylogenetic tree as input. It first performs proteome-wide feature selection to isolate high-SNR convergent sites, then builds lineage-specific prediction models to control for phylogenetic confounding. Outputs include a robust trait prediction model and prioritized molecular signals for downstream functional analysis.
 
+> **Note**: Due to time and resource constraints, this repository contains Chinese comments and Chinese metadata throughout the codebase and notebooks. We apologize for any inconvenience this may cause.
+
 ---
 
 ## Project Structure
